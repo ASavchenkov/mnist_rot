@@ -1,5 +1,7 @@
 import tensorflow as tf
 import glob
+import numpy as np
+import time
 def weight_variable(shape):
     initial = tf.truncated_normal(shape,stddev=0.1)
     return tf.Variable(initial)
@@ -19,53 +21,63 @@ def gen_file_names_and_labels(rootDir):
     """goes through the directory structure and extracts images and labels from each image."""
     file_names = []
     labels = []
+    rotations = []
     for file_name in glob.glob(rootDir+'/*/*'):
          
         file_type_removed = file_name.split('.')[0]
         split_by_dir = file_type_removed.split('/')
+
         file_names.append(file_name)
+
         labels.append(int(split_by_dir[2])) #getting the folder it's in, turning into an int, and using as label
-    return file_names, labels
+        
+        rotations.append(int(split_by_dir[3].split('_')[1]))
+
+    return file_names, labels, rotations
 
 def read_images_from_disk(input_queue):
-    label = tf.one_hot(input_queue[1],depth=10,dtype=tf.float32)
     contents = tf.read_file(input_queue[0])
+    label = tf.one_hot(input_queue[1],depth=10,dtype=tf.float32)
+    rotation = input_queue[2]
+    
     image = tf.image.decode_png(contents,channels=1)
     castedImage = tf.cast(image,tf.float32)
     scaledImage = tf.div(castedImage,256)
-    # scaledImage = castedImage
-    return scaledImage,label
+
+    return scaledImage,label,rotation
+
+def inputPipeline(rootDir,batch_size):
+    #just make lists of all the files. regular python function
+    image_list, label_list, rot_list = gen_file_names_and_labels(rootDir)
+
+    images = tf.convert_to_tensor(image_list,dtype=tf.string)
+    labels = tf.convert_to_tensor(label_list,dtype=tf.int32)
+    rotations = tf.convert_to_tensor(rot_list)
+    rotations_casted = tf.cast(rotations, tf.float32)
+    rotations_scaled = rotations_casted/360
+    
+    input_queue = tf.train.slice_input_producer([images,labels,rotations_scaled], shuffle=True)
+    image, label, rotation = read_images_from_disk(input_queue)
+    image_reshaped= tf.reshape(image,[28,28,1])
+
+    return tf.train.batch([image_reshaped,label,rotation],batch_size = batch_size)
+    
 
 if __name__ == '__main__':
     sess = tf.InteractiveSession()
     
     #THERE A PIPELINE FOR BOTH TESTING AND TRAINING. THEY COME IN PAIRS    
-    image_list_train,   label_list_train    = gen_file_names_and_labels('mnist_png/training')
-    image_list_test,    label_list_test     = gen_file_names_and_labels('mnist_png/testing')
-
-    images_train    = tf.convert_to_tensor(image_list_train,dtype=tf.string)    
-    images_test     = tf.convert_to_tensor(image_list_test,dtype=tf.string)    
-
-    #remember that these aren't the actual images, just file_names
-    labels_train    = tf.convert_to_tensor(label_list_train,dtype=tf.int32)
-    labels_test     = tf.convert_to_tensor(label_list_test,dtype=tf.int32)
-
-    input_queue_train   = tf.train.slice_input_producer([images_train   ,labels_train]  , shuffle=True)
-    input_queue_test    = tf.train.slice_input_producer([images_train   ,labels_train]  , shuffle=True)
+    image_batch, label_batch, rotation_batch = inputPipeline('mnist_png_rot/training',50)
+    image_batch_t, label_batch_t, rotation_batch_t = inputPipeline('mnist_png_rot/testing',100)
     
-    #now we need to make tensorflow switch between train and test based on a variable we pass it 
-    asdf = tf.placeholder(tf.int32)
-    input_queue = tf.cond( asdf>0, lambda: input_queue_train, lambda: input_queue_test)
-    # input_queue = input_queue_test
-    image, label = read_images_from_disk(input_queue)
-    image_reshaped = tf.reshape( image, [28,28,1])
-    image_batch, label_batch = tf.train.batch([image_reshaped,label],batch_size=50)
-    #COMMENTED OUT CODE INVOLVES FEEDING VALUES USING THEIR OWN FEED_DICT THING   
-    # x = tf.placeholder(tf.float32, shape=[28,28,1])
-    # y_ = tf.placeholder(tf.float32, shape=[None, 10])
-    # x = tf.reshape(image_batch,[-1,28,28,1])
-    x = image_batch
-    y_ = label_batch
+    #finally, these down here are the "inputs" to the architecture
+    #there should only be one set of these at this stage in the code.
+    x = tf.placeholder_with_default(image_batch,shape = [None,28,28,1])
+    y_ = tf.placeholder_with_default(label_batch,shape = [None,10])
+    y_r= tf.placeholder_with_default(rotation_batch,shape = [None])
+
+
+
     #convolution 1
     W_conv1 = weight_variable([5,5,1,32])                   #define weights
     b_conv1 = bias_variable([32])                           #define biases
@@ -85,30 +97,55 @@ if __name__ == '__main__':
     h_fc1 = tf.nn.relu(tf.matmul(h_pool2_flat,W_fc1) + b_fc1)
 
     #dropout layer
-    keep_prob = tf.placeholder(tf.float32)#probability that stuff will get dropped?
+    keep_prob = tf.placeholder(tf.float32)#probability that stuff will get dropped
     h_fc1_drop = tf.nn.dropout(h_fc1,keep_prob)
    
     W_fc2 = weight_variable([1024,10])
     b_fc2 = bias_variable([10])
+    
+    W_fc2_r = weight_variable([1024,1])
+    b_fc2_r = bias_variable([1])
 
-    y_conv=tf.nn.softmax(tf.matmul(h_fc1_drop,W_fc2) + b_fc2)
+    y_conv      = tf.nn.softmax(tf.matmul(h_fc1_drop,W_fc2) + b_fc2)
+    y_conv_r    = tf.sigmoid(tf.matmul(h_fc1_drop,W_fc2_r)+ b_fc2_r)
 
-    cross_entropy = tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(y_conv),reduction_indices=[1]))#part that measures correctness
-    train_step = tf.train.AdamOptimizer(1e-4).minimize(cross_entropy) #part that trains
-    correct_prediction = tf.equal(tf.argmax(y_conv,1),tf.argmax(y_,1)) #parts that output actual accuracy
+    #part that measures correctness
+    cross_entropy   = tf.reduce_mean(-tf.reduce_sum(y_ * tf.log(y_conv),reduction_indices=[1]))
+    rotation_mean_squared  = tf.reduce_mean(tf.square(y_conv_r-y_r))
+    class_weight = 1.0;
+    rot_weight = 0.0; #just doing regular classification. not training rotation
+    total_loss = ((cross_entropy*class_weight) + (rotation_mean_squared*rot_weight))
+    #weighted average of losses
+
+    #part that trains
+    train_step = tf.train.AdamOptimizer(1e-4).minimize(total_loss)
+    
+    #parts that outputs accuracy on classifying a batch
+    correct_prediction = tf.equal(tf.argmax(y_conv,1),tf.argmax(y_,1))
     accuracy = tf.reduce_mean(tf.cast(correct_prediction,tf.float32))
+
+    rotation_error = rotation_mean_squared  #this is already a good measure of accuracy,
+                                            #since we're dealing with a continuous function,
+                                            #not one hot encoded classifications.
 
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
     sess.run(tf.initialize_all_variables())
-    print(label_batch.eval(feed_dict={asdf:0,keep_prob:1.0}))
+    print(y_conv_r.eval(feed_dict={keep_prob:1.0}))
+    # time.sleep(10) 
     for i in range(500):
-        # batch = mnist.train.next_batch(50)
      
         if i%20 ==0:
-            train_accuracy = accuracy.eval(feed_dict={keep_prob:1.0,asdf:0})
-            print("step %d, training accuracy %g"%(i, train_accuracy))
-
-        train_step.run(feed_dict={keep_prob:0.9,asdf:0})
+            x_test, y_test, y_r_test = sess.run([image_batch_t,label_batch_t,rotation_batch_t])
+            train_accuracy, rot_err, raw_output = sess.run([accuracy,rotation_error,y_conv_r],feed_dict={keep_prob:1.0,x:x_test,y_:y_test,y_r:y_r_test})
+            print(y_r_test,raw_output)
+            print("step %d, training accuracy %g rot_err: %g"%(i, train_accuracy,rot_err))
+        # if i%1000==0:
+            # accuracies = []
+            # for i in range(100):
+                # x_test, y_test, y_r_test = sess.run([image_batch_t,label_batch_t,rotation_batch_t])
+                # accuracies.append(accuracy.eval(feed_dict={keep_prob:1.0,x:x_test,y_:y_test,y_r:y_r_test}))
+                # print("accuracy after {} iterations is: {}".format(i,np.mean(accuracies)))
+        train_step.run(feed_dict={keep_prob:0.9})
 
 
