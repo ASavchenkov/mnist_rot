@@ -62,8 +62,9 @@ def inputPipeline(rootDir,batch_size):
     rotations_scaled = rotations_casted/360
     
     #now we need to make actual labels for cos and sin
-    rotations_rad = tf.expand_dims(rotations_casted/180*np.pi,1)
-    rotations_cs = tf.concat(1,(tf.cos(rotations_rad),tf.sin(rotations_rad)))
+    rotations_rad = rotations_casted/180*np.pi
+    # and pack them into a single vector.
+    rotations_cs = tf.pack([tf.cos(rotations_rad),tf.sin(rotations_rad)],axis=1)
      
 
     
@@ -73,6 +74,11 @@ def inputPipeline(rootDir,batch_size):
 
     return tf.train.batch([image_reshaped,label,rotation,rotation_cs],batch_size = batch_size)
     
+#keeps every number in the tensor between l_val and h_val    
+def constrain(in_tensor,l_val, h_val):
+    step1 = tf.minimum(in_tensor,h_val)
+    step2 = tf.maximum(step1, l_val)
+    return step2
 
 if __name__ == '__main__':
     sess = tf.InteractiveSession()
@@ -153,7 +159,24 @@ if __name__ == '__main__':
     rotation_error = rotation_mean_squared  #this is already a good measure of accuracy,
                                             #since we're dealing with a continuous function,
                                             #not one hot encoded classifications.
-     
+
+    #takes cos and sin in, and based on the angles gotten from acos and asin
+    #by finding the two most similar ones, you get the angles that best approximate
+    #the neural networks prediction. We then average them.
+    def infer_angle(in_tensor_cs):
+       constrained_cs = constrain(in_tensor_cs,-1,1) 
+       c,s = tf.unpack(constrained_cs,axis=1)
+       
+       inf_c = tf.acos(c)
+       inf_c2 = np.pi - inf_c
+
+       inf_s = tf.asin(s)
+       inf_s3 = -inf_s
+    
+
+       return inf_c,inf_s
+    inferredAngles = infer_angle(y_conv_r_cs)
+
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
     sess.run(tf.initialize_all_variables())
@@ -163,8 +186,10 @@ if __name__ == '__main__':
         if i%20 ==0:
             x_test, y_test, y_r_test, y_r_cs_test = sess.run([image_batch_t,label_batch_t,rotation_batch_t,rotation_cs_batch_t])
             #these are actual values not tensors ^            these are the tensors we're getting values from ^
-            conv_cs, cs_error, label_cs = sess.run([y_conv_r_cs, cs_mean_squared,y_r_cs],
+            conv_cs, inferred_cs, cs_error, label_cs = sess.run([y_conv_r_cs, inferredAngles, cs_mean_squared,y_r_cs],
                     feed_dict={keep_prob:1.0,x:x_test,y_:y_test,y_r:y_r_test,y_r_cs:y_r_cs_test})
+            # print(inference_cs[0]*180/np.pi)
+            print(inferred_cs)
             print(cs_error) #I wonder why this is converging to zero nearly instantly.
         # if i%1000==0:
             # accuracies = []
