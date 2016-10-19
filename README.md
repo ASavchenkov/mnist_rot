@@ -19,3 +19,5 @@ Notable current experiments involve:
 
 all of the code is unfotunately still in a single file. When I have time I will split
 boilerplate convnet code and interesting bits that change often into separate files.
+
+(this change exists just so I can test whether or not my email is linked correctly)
